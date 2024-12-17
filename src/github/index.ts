@@ -629,6 +629,58 @@ async function getIssue(
   return GitHubIssueSchema.parse(await response.json());
 }
 
+async function createIssue(
+  owner: string,
+  repo: string,
+  options: z.infer<typeof CreateIssueOptionsSchema>
+): Promise<GitHubIssue> {
+  const response = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/issues`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "github-mcp-server",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(options),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.statusText}`);
+  }
+
+  return GitHubIssueSchema.parse(await response.json());
+}
+
+async function createPullRequest(
+  owner: string,
+  repo: string,
+  options: z.infer<typeof CreatePullRequestOptionsSchema>
+): Promise<GitHubPullRequest> {
+  const response = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/pulls`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "github-mcp-server",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(options),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.statusText}`);
+  }
+
+  return GitHubPullRequestSchema.parse(await response.json());
+}
+
 async function updateIssue(
   owner: string,
   repo: string,
@@ -785,6 +837,20 @@ const tools = {
       return createRepository(params);
     },
   },
+  create_issue: {
+    schema: zodToJsonSchema(CreateIssueSchema),
+    handler: async (params: z.infer<typeof CreateIssueSchema>) => {
+      const { owner, repo, ...options } = params;
+      return createIssue(owner, repo, options);
+    },
+  },
+  create_pull_request: {
+    schema: zodToJsonSchema(CreatePullRequestSchema),
+    handler: async (params: z.infer<typeof CreatePullRequestSchema>) => {
+      const { owner, repo, ...options } = params;
+      return createPullRequest(owner, repo, options);
+    },
+  },
   list_commits: {
     schema: zodToJsonSchema(ListCommitsSchema),
     handler: async (params: z.infer<typeof ListCommitsSchema>) => {
@@ -822,8 +888,16 @@ server.callToolHandler = async (request: z.infer<typeof CallToolRequestSchema>) 
 };
 
 // Start the server
-const transport = new StdioServerTransport();
-server.listen(transport);// List gists with optional parameters
+async function runServer() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("GitHub MCP Server running on stdio");
+}
+
+runServer().catch((error) => {
+  console.error("Fatal error in main():", error);
+  process.exit(1);
+});// List gists with optional parameters
 async function listGists(params: {
   since?: string;
   per_page?: number;
