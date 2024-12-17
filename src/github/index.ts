@@ -857,6 +857,27 @@ const tools = {
       return listCommits(params.owner, params.repo, params);
     },
   },
+  add_issue_comment: {
+    schema: zodToJsonSchema(IssueCommentSchema),
+    handler: async (params: any) => {
+      const { owner, repo, issue_number, body } = params;
+      return addIssueComment(owner, repo, issue_number, body);
+    },
+  },
+  list_issues: {
+    schema: zodToJsonSchema(ListIssuesOptionsSchema),
+    handler: async (params: any) => {
+      const { owner, repo, ...options } = params;
+      return listIssues(owner, repo, options);
+    },
+  },
+  update_issue: {
+    schema: zodToJsonSchema(UpdateIssueOptionsSchema),
+    handler: async (params: any) => {
+      const { owner, repo, issue_number, ...options } = params;
+      return updateIssue(owner, repo, issue_number, options);
+    },
+  },
 };
 
 // Server setup
