@@ -38,6 +38,8 @@ import {
   ListIssuesOptionsSchema,
   PushFilesSchema,
   SearchCodeResponseSchema,
+  SearchGistsResponseSchema,
+  SearchGistsSchema,
   SearchCodeSchema,
   SearchIssuesResponseSchema,
   SearchIssuesSchema,
@@ -46,6 +48,7 @@ import {
   SearchUsersSchema,
   UpdateIssueOptionsSchema,
   type FileOperation,
+  type SearchGistsResponse,
   type GitHubCommit,
   type GitHubContent,
   type GitHubCreateUpdateFileResponse,
@@ -58,7 +61,8 @@ import {
   type GitHubTree,
   type SearchCodeResponse,
   type SearchIssuesResponse,
-  type SearchUsersResponse
+  type SearchUsersResponse,
+  type IssueComment
 } from './schemas.js';
 
 const server = new Server(
@@ -210,58 +214,6 @@ async function getFileContents(
   return data;
 }
 
-async function createIssue(
-  owner: string,
-  repo: string,
-  options: z.infer<typeof CreateIssueOptionsSchema>
-): Promise<GitHubIssue> {
-  const response = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/issues`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "github-mcp-server",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(options),
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.statusText}`);
-  }
-
-  return GitHubIssueSchema.parse(await response.json());
-}
-
-async function createPullRequest(
-  owner: string,
-  repo: string,
-  options: z.infer<typeof CreatePullRequestOptionsSchema>
-): Promise<GitHubPullRequest> {
-  const response = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/pulls`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "github-mcp-server",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(options),
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.statusText}`);
-  }
-
-  return GitHubPullRequestSchema.parse(await response.json());
-}
-
 async function createOrUpdateFile(
   owner: string,
   repo: string,
@@ -387,7 +339,8 @@ async function updateReference(
   owner: string,
   repo: string,
   ref: string,
-  sha: string
+  sha: string,
+  force: boolean = false
 ): Promise<GitHubReference> {
   const response = await fetch(
     `https://api.github.com/repos/${owner}/${repo}/git/refs/${ref}`,
@@ -401,7 +354,7 @@ async function updateReference(
       },
       body: JSON.stringify({
         sha,
-        force: true,
+        force,
       }),
     }
   );
@@ -419,8 +372,9 @@ async function pushFiles(
   branch: string,
   files: FileOperation[],
   message: string
-): Promise<GitHubReference> {
-  const refResponse = await fetch(
+): Promise<void> {
+  // Get the SHA of the latest commit in the branch
+  const branchResponse = await fetch(
     `https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${branch}`,
     {
       headers: {
@@ -431,29 +385,57 @@ async function pushFiles(
     }
   );
 
-  if (!refResponse.ok) {
-    throw new Error(`GitHub API error: ${refResponse.statusText}`);
+  if (!branchResponse.ok) {
+    throw new Error(`GitHub API error: ${branchResponse.statusText}`);
   }
 
-  const ref = GitHubReferenceSchema.parse(await refResponse.json());
-  const commitSha = ref.object.sha;
+  const branchData = GitHubReferenceSchema.parse(await branchResponse.json());
+  const latestCommitSha = branchData.object.sha;
 
-  const tree = await createTree(owner, repo, files, commitSha);
-  const commit = await createCommit(owner, repo, message, tree.sha, [
-    commitSha,
-  ]);
-  return await updateReference(owner, repo, `heads/${branch}`, commit.sha);
+  // Create a new tree with the files
+  const tree = await createTree(owner, repo, files, latestCommitSha);
+
+  // Create a new commit
+  const commit = await createCommit(owner, repo, message, tree.sha, [latestCommitSha]);
+
+  // Update the reference to point to the new commit
+  await updateReference(owner, repo, `heads/${branch}`, commit.sha);
+}
+
+export async function searchGists(
+  params: z.infer<typeof SearchGistsSchema>
+): Promise<SearchGistsResponse> {
+  const url = new URL("https://api.github.com/search/gists");
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      url.searchParams.append(key, value.toString());
+    }
+  });
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "github-mcp-server",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.statusText}`);
+  }
+
+  return SearchGistsResponseSchema.parse(await response.json());
 }
 
 async function searchRepositories(
-  query: string,
-  page: number = 1,
-  perPage: number = 30
+  query: z.infer<typeof SearchRepositoriesSchema>
 ): Promise<GitHubSearchResponse> {
   const url = new URL("https://api.github.com/search/repositories");
-  url.searchParams.append("q", query);
-  url.searchParams.append("page", page.toString());
-  url.searchParams.append("per_page", perPage.toString());
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      url.searchParams.append(key, value.toString());
+    }
+  });
 
   const response = await fetch(url.toString(), {
     headers: {
@@ -468,6 +450,81 @@ async function searchRepositories(
   }
 
   return GitHubSearchResponseSchema.parse(await response.json());
+}
+
+async function searchCode(
+  query: z.infer<typeof SearchCodeSchema>
+): Promise<SearchCodeResponse> {
+  const url = new URL("https://api.github.com/search/code");
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      url.searchParams.append(key, value.toString());
+    }
+  });
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "github-mcp-server",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.statusText}`);
+  }
+
+  return SearchCodeResponseSchema.parse(await response.json());
+}
+
+async function searchIssues(
+  query: z.infer<typeof SearchIssuesSchema>
+): Promise<SearchIssuesResponse> {
+  const url = new URL("https://api.github.com/search/issues");
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      url.searchParams.append(key, value.toString());
+    }
+  });
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "github-mcp-server",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.statusText}`);
+  }
+
+  return SearchIssuesResponseSchema.parse(await response.json());
+}
+
+async function searchUsers(
+  query: z.infer<typeof SearchUsersSchema>
+): Promise<SearchUsersResponse> {
+  const url = new URL("https://api.github.com/search/users");
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      url.searchParams.append(key, value.toString());
+    }
+  });
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "github-mcp-server",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.statusText}`);
+  }
+
+  return SearchUsersResponseSchema.parse(await response.json());
 }
 
 async function createRepository(
@@ -494,29 +551,24 @@ async function createRepository(
 async function listCommits(
   owner: string,
   repo: string,
-  page: number = 1,
-  perPage: number = 30,
-  sha?: string,
+  options?: z.infer<typeof ListCommitsSchema>
 ): Promise<GitHubListCommits> {
   const url = new URL(`https://api.github.com/repos/${owner}/${repo}/commits`);
-  url.searchParams.append("page", page.toString());
-  url.searchParams.append("per_page", perPage.toString());
-  if (sha) {
-    url.searchParams.append("sha", sha);
+  if (options) {
+    Object.entries(options).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        url.searchParams.append(key, value.toString());
+      }
+    });
   }
 
-  const response = await fetch(
-    url.toString(),
-    {
-      method: "GET",
-      headers: {
-        "Authorization": `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "github-mcp-server",
-        "Content-Type": "application/json"
-      },
-    }
-  );
+  const response = await fetch(url.toString(), {
+    headers: {
+      Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "github-mcp-server",
+    },
+  });
 
   if (!response.ok) {
     throw new Error(`GitHub API error: ${response.statusText}`);
@@ -528,25 +580,23 @@ async function listCommits(
 async function listIssues(
   owner: string,
   repo: string,
-  options: Omit<z.infer<typeof ListIssuesOptionsSchema>, 'owner' | 'repo'>
+  options?: z.infer<typeof ListIssuesOptionsSchema>
 ): Promise<GitHubIssue[]> {
   const url = new URL(`https://api.github.com/repos/${owner}/${repo}/issues`);
-
-  // Add query parameters
-  if (options.state) url.searchParams.append('state', options.state);
-  if (options.labels) url.searchParams.append('labels', options.labels.join(','));
-  if (options.sort) url.searchParams.append('sort', options.sort);
-  if (options.direction) url.searchParams.append('direction', options.direction);
-  if (options.since) url.searchParams.append('since', options.since);
-  if (options.page) url.searchParams.append('page', options.page.toString());
-  if (options.per_page) url.searchParams.append('per_page', options.per_page.toString());
+  if (options) {
+    Object.entries(options).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        url.searchParams.append(key, value.toString());
+      }
+    });
+  }
 
   const response = await fetch(url.toString(), {
     headers: {
-      "Authorization": `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
-      "Accept": "application/vnd.github.v3+json",
-      "User-Agent": "github-mcp-server"
-    }
+      Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "github-mcp-server",
+    },
   });
 
   if (!response.ok) {
@@ -554,142 +604,6 @@ async function listIssues(
   }
 
   return z.array(GitHubIssueSchema).parse(await response.json());
-}
-
-async function updateIssue(
-  owner: string,
-  repo: string,
-  issueNumber: number,
-  options: Omit<z.infer<typeof UpdateIssueOptionsSchema>, 'owner' | 'repo' | 'issue_number'>
-): Promise<GitHubIssue> {
-  const response = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`,
-    {
-      method: "PATCH",
-      headers: {
-        "Authorization": `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "github-mcp-server",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        title: options.title,
-        body: options.body,
-        state: options.state,
-        labels: options.labels,
-        assignees: options.assignees,
-        milestone: options.milestone
-      })
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.statusText}`);
-  }
-
-  return GitHubIssueSchema.parse(await response.json());
-}
-
-async function addIssueComment(
-  owner: string,
-  repo: string,
-  issueNumber: number,
-  body: string
-): Promise<z.infer<typeof IssueCommentSchema>> {
-  const response = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments`,
-    {
-      method: "POST",
-      headers: {
-        "Authorization": `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "github-mcp-server",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ body })
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.statusText}`);
-  }
-
-  return IssueCommentSchema.parse(await response.json());
-}
-
-async function searchCode(
-  params: z.infer<typeof SearchCodeSchema>
-): Promise<SearchCodeResponse> {
-  const url = new URL("https://api.github.com/search/code");
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      url.searchParams.append(key, value.toString());
-    }
-  });
-
-  const response = await fetch(url.toString(), {
-    headers: {
-      Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "github-mcp-server",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.statusText}`);
-  }
-
-  return SearchCodeResponseSchema.parse(await response.json());
-}
-
-async function searchIssues(
-  params: z.infer<typeof SearchIssuesSchema>
-): Promise<SearchIssuesResponse> {
-  const url = new URL("https://api.github.com/search/issues");
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      url.searchParams.append(key, value.toString());
-    }
-  });
-
-  const response = await fetch(url.toString(), {
-    headers: {
-      Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "github-mcp-server",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.statusText}`);
-  }
-
-  return SearchIssuesResponseSchema.parse(await response.json());
-}
-
-async function searchUsers(
-  params: z.infer<typeof SearchUsersSchema>
-): Promise<SearchUsersResponse> {
-  const url = new URL("https://api.github.com/search/users");
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      url.searchParams.append(key, value.toString());
-    }
-  });
-
-  const response = await fetch(url.toString(), {
-    headers: {
-      Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "github-mcp-server",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.statusText}`);
-  }
-
-  return SearchUsersResponseSchema.parse(await response.json());
 }
 
 async function getIssue(
@@ -706,336 +620,327 @@ async function getIssue(
         "User-Agent": "github-mcp-server",
       },
     }
-);
+  );
 
   if (!response.ok) {
-    throw new Error(`Github API error: ${response.statusText}`);
+    throw new Error(`GitHub API error: ${response.statusText}`);
   }
 
   return GitHubIssueSchema.parse(await response.json());
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "create_or_update_file",
-        description: "Create or update a single file in a GitHub repository",
-        inputSchema: zodToJsonSchema(CreateOrUpdateFileSchema),
+async function updateIssue(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  options: z.infer<typeof UpdateIssueOptionsSchema>
+): Promise<GitHubIssue> {
+  const response = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "github-mcp-server",
+        "Content-Type": "application/json",
       },
-      {
-        name: "search_repositories",
-        description: "Search for GitHub repositories",
-        inputSchema: zodToJsonSchema(SearchRepositoriesSchema),
-      },
-      {
-        name: "create_repository",
-        description: "Create a new GitHub repository in your account",
-        inputSchema: zodToJsonSchema(CreateRepositorySchema),
-      },
-      {
-        name: "get_file_contents",
-        description:
-          "Get the contents of a file or directory from a GitHub repository",
-        inputSchema: zodToJsonSchema(GetFileContentsSchema),
-      },
-      {
-        name: "push_files",
-        description:
-          "Push multiple files to a GitHub repository in a single commit",
-        inputSchema: zodToJsonSchema(PushFilesSchema),
-      },
-      {
-        name: "create_issue",
-        description: "Create a new issue in a GitHub repository",
-        inputSchema: zodToJsonSchema(CreateIssueSchema),
-      },
-      {
-        name: "create_pull_request",
-        description: "Create a new pull request in a GitHub repository",
-        inputSchema: zodToJsonSchema(CreatePullRequestSchema),
-      },
-      {
-        name: "fork_repository",
-        description:
-          "Fork a GitHub repository to your account or specified organization",
-        inputSchema: zodToJsonSchema(ForkRepositorySchema),
-      },
-      {
-        name: "create_branch",
-        description: "Create a new branch in a GitHub repository",
-        inputSchema: zodToJsonSchema(CreateBranchSchema),
-      },
-      {
-        name: "list_commits",
-        description: "Get list of commits of a branch in a GitHub repository",
-        inputSchema: zodToJsonSchema(ListCommitsSchema)
-      },
-      {
-        name: "list_issues",
-        description: "List issues in a GitHub repository with filtering options",
-        inputSchema: zodToJsonSchema(ListIssuesOptionsSchema)
-      },
-      {
-        name: "update_issue",
-        description: "Update an existing issue in a GitHub repository",
-        inputSchema: zodToJsonSchema(UpdateIssueOptionsSchema)
-      },
-      {
-        name: "add_issue_comment",
-        description: "Add a comment to an existing issue",
-        inputSchema: zodToJsonSchema(IssueCommentSchema)
-      },
-      {
-        name: "search_code",
-        description: "Search for code across GitHub repositories",
-        inputSchema: zodToJsonSchema(SearchCodeSchema),
-      },
-      {
-        name: "search_issues",
-        description:
-          "Search for issues and pull requests across GitHub repositories",
-        inputSchema: zodToJsonSchema(SearchIssuesSchema),
-      },
-      {
-        name: "search_users",
-        description: "Search for users on GitHub",
-        inputSchema: zodToJsonSchema(SearchUsersSchema),
-      },
-      {
-        name: "get_issue",
-        description: "Get details of a specific issue in a GitHub repository.",
-        inputSchema: zodToJsonSchema(GetIssueSchema)
-      }
-    ],
-  };
-});
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  try {
-    if (!request.params.arguments) {
-      throw new Error("Arguments are required");
+      body: JSON.stringify(options),
     }
+  );
 
-    switch (request.params.name) {
-      case "fork_repository": {
-        const args = ForkRepositorySchema.parse(request.params.arguments);
-        const fork = await forkRepository(
-          args.owner,
-          args.repo,
-          args.organization
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(fork, null, 2) }],
-        };
-      }
-
-      case "create_branch": {
-        const args = CreateBranchSchema.parse(request.params.arguments);
-        let sha: string;
-        if (args.from_branch) {
-          const response = await fetch(
-            `https://api.github.com/repos/${args.owner}/${args.repo}/git/refs/heads/${args.from_branch}`,
-            {
-              headers: {
-                Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
-                Accept: "application/vnd.github.v3+json",
-                "User-Agent": "github-mcp-server",
-              },
-            }
-          );
-
-          if (!response.ok) {
-            throw new Error(`Source branch '${args.from_branch}' not found`);
-          }
-
-          const data = GitHubReferenceSchema.parse(await response.json());
-          sha = data.object.sha;
-        } else {
-          sha = await getDefaultBranchSHA(args.owner, args.repo);
-        }
-
-        const branch = await createBranch(args.owner, args.repo, {
-          ref: args.branch,
-          sha,
-        });
-
-        return {
-          content: [{ type: "text", text: JSON.stringify(branch, null, 2) }],
-        };
-      }
-
-      case "search_repositories": {
-        const args = SearchRepositoriesSchema.parse(request.params.arguments);
-        const results = await searchRepositories(
-          args.query,
-          args.page,
-          args.perPage
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
-        };
-      }
-
-      case "create_repository": {
-        const args = CreateRepositorySchema.parse(request.params.arguments);
-        const repository = await createRepository(args);
-        return {
-          content: [
-            { type: "text", text: JSON.stringify(repository, null, 2) },
-          ],
-        };
-      }
-
-      case "get_file_contents": {
-        const args = GetFileContentsSchema.parse(request.params.arguments);
-        const contents = await getFileContents(
-          args.owner,
-          args.repo,
-          args.path,
-          args.branch
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(contents, null, 2) }],
-        };
-      }
-
-      case "create_or_update_file": {
-        const args = CreateOrUpdateFileSchema.parse(request.params.arguments);
-        const result = await createOrUpdateFile(
-          args.owner,
-          args.repo,
-          args.path,
-          args.content,
-          args.message,
-          args.branch,
-          args.sha
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      case "push_files": {
-        const args = PushFilesSchema.parse(request.params.arguments);
-        const result = await pushFiles(
-          args.owner,
-          args.repo,
-          args.branch,
-          args.files,
-          args.message
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      case "create_issue": {
-        const args = CreateIssueSchema.parse(request.params.arguments);
-        const { owner, repo, ...options } = args;
-        const issue = await createIssue(owner, repo, options);
-        return {
-          content: [{ type: "text", text: JSON.stringify(issue, null, 2) }],
-        };
-      }
-
-      case "create_pull_request": {
-        const args = CreatePullRequestSchema.parse(request.params.arguments);
-        const { owner, repo, ...options } = args;
-        const pullRequest = await createPullRequest(owner, repo, options);
-        return {
-          content: [
-            { type: "text", text: JSON.stringify(pullRequest, null, 2) },
-          ],
-        };
-      }
-
-      case "search_code": {
-        const args = SearchCodeSchema.parse(request.params.arguments);
-        const results = await searchCode(args);
-        return {
-          content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
-        };
-      }
-
-      case "search_issues": {
-        const args = SearchIssuesSchema.parse(request.params.arguments);
-        const results = await searchIssues(args);
-        return {
-          content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
-        };
-      }
-
-      case "search_users": {
-        const args = SearchUsersSchema.parse(request.params.arguments);
-        const results = await searchUsers(args);
-        return {
-          content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
-        };
-      }
-
-      case "list_issues": {
-        const args = ListIssuesOptionsSchema.parse(request.params.arguments);
-        const { owner, repo, ...options } = args;
-        const issues = await listIssues(owner, repo, options);
-        return { toolResult: issues };
-      }
-
-      case "update_issue": {
-        const args = UpdateIssueOptionsSchema.parse(request.params.arguments);
-        const { owner, repo, issue_number, ...options } = args;
-        const issue = await updateIssue(owner, repo, issue_number, options);
-        return { toolResult: issue };
-      }
-
-      case "add_issue_comment": {
-        const args = IssueCommentSchema.parse(request.params.arguments);
-        const { owner, repo, issue_number, body } = args;
-        const comment = await addIssueComment(owner, repo, issue_number, body);
-        return { toolResult: comment };
-      }
-
-      case "list_commits": {
-        const args = ListCommitsSchema.parse(request.params.arguments);
-        const results = await listCommits(args.owner, args.repo, args.page, args.perPage, args.sha);
-        return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
-      }
-
-      case "get_issue": {
-        const args = z.object({
-          owner: z.string(),
-          repo: z.string(),
-          issue_number: z.number()
-        }).parse(request.params.arguments);
-        const issue = await getIssue(args.owner, args.repo, args.issue_number);
-        return { toolResult: issue };
-      }
-
-      default:
-        throw new Error(`Unknown tool: ${request.params.name}`);
-    }
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      throw new Error(
-        `Invalid arguments: ${error.errors
-          .map(
-            (e: z.ZodError["errors"][number]) =>
-              `${e.path.join(".")}: ${e.message}`
-          )
-          .join(", ")}`
-      );
-    }
-    throw error;
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.statusText}`);
   }
-});
 
-async function runServer() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("GitHub MCP Server running on stdio");
+  return GitHubIssueSchema.parse(await response.json());
 }
 
-runServer().catch((error) => {
-  console.error("Fatal error in main():", error);
-  process.exit(1);
-});
+async function addIssueComment(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  body: string
+): Promise<IssueComment> {
+  const response = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "github-mcp-server",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.statusText}`);
+  }
+
+  return IssueCommentSchema.parse(await response.json());
+}
+
+// Tool definitions
+const tools = {
+  fork_repository: {
+    schema: zodToJsonSchema(ForkRepositorySchema),
+    handler: async (params: z.infer<typeof ForkRepositorySchema>) => {
+      return forkRepository(params.owner, params.repo, params.organization);
+    },
+  },
+  create_branch: {
+    schema: zodToJsonSchema(CreateBranchSchema),
+    handler: async (params: z.infer<typeof CreateBranchSchema>) => {
+      let sha = params.from_branch;
+      if (!sha) {
+        sha = await getDefaultBranchSHA(params.owner, params.repo);
+      }
+      return createBranch(params.owner, params.repo, {
+        ref: params.branch,
+        sha,
+      });
+    },
+  },
+  get_file_contents: {
+    schema: zodToJsonSchema(GetFileContentsSchema),
+    handler: async (params: z.infer<typeof GetFileContentsSchema>) => {
+      return getFileContents(params.owner, params.repo, params.path, params.branch);
+    },
+  },
+  create_or_update_file: {
+    schema: zodToJsonSchema(CreateOrUpdateFileSchema),
+    handler: async (params: z.infer<typeof CreateOrUpdateFileSchema>) => {
+      return createOrUpdateFile(
+        params.owner,
+        params.repo,
+        params.path,
+        params.content,
+        params.message,
+        params.branch,
+        params.sha
+      );
+    },
+  },
+  push_files: {
+    schema: zodToJsonSchema(PushFilesSchema),
+    handler: async (params: z.infer<typeof PushFilesSchema>) => {
+      await pushFiles(
+        params.owner,
+        params.repo,
+        params.branch,
+        params.files,
+        params.message
+      );
+      return { success: true };
+    },
+  },
+  search_gists: {
+    schema: zodToJsonSchema(SearchGistsSchema),
+    handler: async (params: z.infer<typeof SearchGistsSchema>) => {
+      return searchGists(params);
+    },
+  },
+  search_repositories: {
+    schema: zodToJsonSchema(SearchRepositoriesSchema),
+    handler: async (params: z.infer<typeof SearchRepositoriesSchema>) => {
+      return searchRepositories(params);
+    },
+  },
+  search_code: {
+    schema: zodToJsonSchema(SearchCodeSchema),
+    handler: async (params: z.infer<typeof SearchCodeSchema>) => {
+      return searchCode(params);
+    },
+  },
+  search_issues: {
+    schema: zodToJsonSchema(SearchIssuesSchema),
+    handler: async (params: z.infer<typeof SearchIssuesSchema>) => {
+      return searchIssues(params);
+    },
+  },
+  search_users: {
+    schema: zodToJsonSchema(SearchUsersSchema),
+    handler: async (params: z.infer<typeof SearchUsersSchema>) => {
+      return searchUsers(params);
+    },
+  },
+  get_issue: {
+    schema: zodToJsonSchema(GetIssueSchema),
+    handler: async (params: z.infer<typeof GetIssueSchema>) => {
+      return getIssue(params.owner, params.repo, params.issue_number);
+    },
+  },
+  create_issue: {
+    schema: zodToJsonSchema(CreateIssueSchema),
+    handler: async (params: z.infer<typeof CreateIssueSchema>) => {
+      return createIssue(params.owner, params.repo, params);
+    },
+  },
+  create_repository: {
+    schema: zodToJsonSchema(CreateRepositorySchema),
+    handler: async (params: z.infer<typeof CreateRepositorySchema>) => {
+      return createRepository(params);
+    },
+  },
+  list_commits: {
+    schema: zodToJsonSchema(ListCommitsSchema),
+    handler: async (params: z.infer<typeof ListCommitsSchema>) => {
+      return listCommits(params.owner, params.repo, params);
+    },
+  },
+};
+
+// Server setup
+server.capabilities.tools = tools;
+
+// Request handlers
+server.listToolsHandler = async (request: z.infer<typeof ListToolsRequestSchema>) => {
+  return {
+    tools: Object.entries(tools).map(([name, tool]) => ({
+      name,
+      description: tool.schema.description || "",
+      schema: tool.schema,
+    })),
+  };
+};
+
+server.callToolHandler = async (request: z.infer<typeof CallToolRequestSchema>) => {
+  const tool = tools[request.name as keyof typeof tools];
+  if (!tool) {
+    throw new Error(`Unknown tool: ${request.name}`);
+  }
+
+  try {
+    return tool.handler(request.parameters);
+  } catch (error) {
+    console.error(`Error in ${request.name}:`, error);
+    throw error;
+  }
+};
+
+// Start the server
+const transport = new StdioServerTransport();
+server.listen(transport);// List gists with optional parameters
+async function listGists(params: {
+  since?: string;
+  per_page?: number;
+  page?: number;
+}): Promise<SearchGistsResponse> {
+  const url = new URL('https://api.github.com/gists');
+  
+  if (params.since) {
+    url.searchParams.append('since', params.since);
+  }
+  if (params.per_page) {
+    url.searchParams.append('per_page', params.per_page.toString());
+  }
+  if (params.page) {
+    url.searchParams.append('page', params.page.toString());
+  }
+
+  try {
+    const response = await fetch(url.toString(), {
+      headers: {
+        Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+        Accept: 'application/vnd.github.v3+json',
+        'User-Agent': 'github-mcp-server',
+      },
+    });
+
+    // Handle rate limiting
+    const rateLimitRemaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0');
+    const rateLimitReset = parseInt(response.headers.get('x-ratelimit-reset') || '0');
+
+    if (response.status === 403 && rateLimitRemaining === 0) {
+      const resetDate = new Date(rateLimitReset * 1000);
+      throw new Error(
+        `GitHub API rate limit exceeded. Rate limit will reset at ${resetDate.toISOString()}`
+      );
+    }
+
+    // Handle other error responses
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(
+        `GitHub API error (${response.status}): ${errorData.message || response.statusText}`
+      );
+    }
+
+    const data = await response.json();
+    // Transform the response to match our schema
+    return {
+      total_count: data.length,
+      incomplete_results: false,
+      items: data
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('GitHub API')) {
+      throw error;
+    }
+    throw new Error(`Error listing gists: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// Search public gists (using public gists endpoint and filtering)
+async function searchGists(
+  params: z.infer<typeof SearchGistsSchema>
+): Promise<SearchGistsResponse> {
+  // First get the gists
+  const gists = await listGists({
+    per_page: params.per_page,
+    page: params.page
+  });
+
+  // Parse search query
+  const searchTerms = params.q.toLowerCase().split(' ');
+  const languageFilter = searchTerms.find(term => term.startsWith('language:'))?.split(':')[1];
+  const keywords = searchTerms.filter(term => !term.startsWith('language:'));
+
+  // Filter gists based on search criteria
+  const filteredItems = gists.items.filter(gist => {
+    // Check language filter
+    if (languageFilter) {
+      const hasMatchingFile = Object.values(gist.files).some(
+        file => file.language?.toLowerCase() === languageFilter
+      );
+      if (!hasMatchingFile) return false;
+    }
+
+    // Check keywords
+    if (keywords.length > 0) {
+      const searchableText = [
+        gist.description,
+        ...Object.values(gist.files).map(f => f.filename)
+      ].filter(Boolean).join(' ').toLowerCase();
+      
+      return keywords.every(keyword => searchableText.includes(keyword));
+    }
+
+    return true;
+  });
+
+  // Sort results if requested
+  if (params.sort) {
+    filteredItems.sort((a, b) => {
+      switch (params.sort) {
+        case 'updated':
+          return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+        default:
+          return 0;
+      }
+    });
+
+    if (params.order === 'asc') {
+      filteredItems.reverse();
+    }
+  }
+
+  return {
+    total_count: filteredItems.length,
+    incomplete_results: false,
+    items: filteredItems
+  };
+}
