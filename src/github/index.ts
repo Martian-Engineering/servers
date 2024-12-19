@@ -878,6 +878,28 @@ const tools = {
       return updateIssue(owner, repo, issue_number, options);
     },
   },
+  create_gist: {
+    schema: zodToJsonSchema(CreateGistSchema),
+    handler: async (params: z.infer<typeof CreateGistSchema>) => {
+      const response = await fetch('https://api.github.com/gists', {
+        method: 'POST',
+        headers: {
+          Authorization: `token ${GITHUB_PERSONAL_ACCESS_TOKEN}`,
+          Accept: 'application/vnd.github.v3+json',
+          'User-Agent': 'github-mcp-server',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(params)
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`GitHub API error (${response.status}): ${errorData.message || response.statusText}`);
+      }
+
+      return response.json();
+    },
+  },
 };
 
 // Server setup

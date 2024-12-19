@@ -717,3 +717,73 @@ export type SearchIssueItem = z.infer<typeof SearchIssueItemSchema>;
 export type SearchIssuesResponse = z.infer<typeof SearchIssuesResponseSchema>;
 export type SearchUserItem = z.infer<typeof SearchUserItemSchema>;
 export type SearchUsersResponse = z.infer<typeof SearchUsersResponseSchema>;
+// Add new gist schemas at the end of the file
+export const GistFileSchema = z.object({
+  filename: z.string(),
+  type: z.string(),
+  language: z.string().nullable(),
+  raw_url: z.string(),
+  size: z.number()
+});
+
+export const SearchGistItemSchema = z.object({
+  url: z.string(),
+  forks_url: z.string(),
+  commits_url: z.string(),
+  id: z.string(),
+  node_id: z.string(),
+  git_pull_url: z.string(),
+  git_push_url: z.string(),
+  html_url: z.string(),
+  files: z.record(GistFileSchema),
+  public: z.boolean(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  description: z.string().nullable(),
+  comments: z.number(),
+  comments_url: z.string(),
+  owner: GitHubOwnerSchema,
+  truncated: z.boolean()
+});
+
+export const SearchGistsResponseSchema = z.object({
+  total_count: z.number(),
+  incomplete_results: z.boolean(),
+  items: z.array(SearchGistItemSchema)
+});
+
+export const SearchGistsSchema = z.object({
+  q: z.string().describe("Search query. See GitHub gist search syntax"),
+  sort: z.enum(['stars', 'forks', 'updated'])
+    .optional()
+    .describe("Sort field"),
+  order: z.enum(['asc', 'desc'])
+    .optional()
+    .describe("Sort order (asc or desc)"),
+  per_page: z.number()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe("Results per page (max 100)"),
+  page: z.number()
+    .min(1)
+    .optional()
+    .describe("Page number")
+});
+
+export type SearchGistsResponse = z.infer<typeof SearchGistsResponseSchema>;
+
+// Add these schema definitions near the gist schemas section
+export const CreateGistFileSchema = z.object({
+  content: z.string().describe("The content of the file"),
+  filename: z.string().describe("The name of the file")
+});
+
+export const CreateGistSchema = z.object({
+  description: z.string().optional().describe("Description of the gist"),
+  public: z.boolean().default(true).describe("Whether the gist is public"),
+  files: z.record(CreateGistFileSchema).describe("Files to include in the gist")
+});
+
+export type CreateGistFile = z.infer<typeof CreateGistFileSchema>;
+export type CreateGist = z.infer<typeof CreateGistSchema>;
