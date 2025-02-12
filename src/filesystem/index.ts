@@ -191,45 +191,53 @@ async function searchFiles(
   pattern: string,
   excludePatterns: string[] = []
 ): Promise<string[]> {
-  const results: string[] = [];
+  const { exec } = await import('child_process');
+  const { promisify } = await import('util');
+  const execAsync = promisify(exec);
 
-  async function search(currentPath: string) {
-    const entries = await fs.readdir(currentPath, { withFileTypes: true });
+  // Validate the root path first
+  const validRootPath = await validatePath(rootPath);
 
-    for (const entry of entries) {
-      const fullPath = path.join(currentPath, entry.name);
+  // Escape special regex characters in the pattern if it's not already a regex
+  const escapedPattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-      try {
-        // Validate each path before processing
-        await validatePath(fullPath);
+  // Build the ripgrep command
+  // Use ripgrep to both list and filter files
+  let cmd = `rg --files --iglob '*${escapedPattern}*'`;
 
-        // Check if path matches any exclude pattern
-        const relativePath = path.relative(rootPath, fullPath);
-        const shouldExclude = excludePatterns.some(pattern => {
-          const globPattern = pattern.includes('*') ? pattern : `**/${pattern}/**`;
-          return minimatch(relativePath, globPattern, { dot: true });
-        });
-
-        if (shouldExclude) {
-          continue;
-        }
-
-        if (entry.name.toLowerCase().includes(pattern.toLowerCase())) {
-          results.push(fullPath);
-        }
-
-        if (entry.isDirectory()) {
-          await search(fullPath);
-        }
-      } catch (error) {
-        // Skip invalid paths during search
-        continue;
-      }
-    }
+  // Add exclude patterns if any exist
+  for (const excludePattern of excludePatterns) {
+    // Convert the pattern to ripgrep glob format
+    const globPattern = excludePattern.includes('*') ? excludePattern : `**/${excludePattern}/**`;
+    cmd += ` --glob '!${globPattern}'`;
   }
 
-  await search(rootPath);
-  return results;
+  // Add the search directory
+  cmd += ` '${validRootPath}'`;
+
+  try {
+    // First check if ripgrep is installed
+    try {
+      await execAsync('rg --version');
+    } catch (error) {
+      throw new Error('ripgrep (rg) is not installed or not in PATH');
+    }
+
+    const { stdout } = await execAsync(cmd);
+    return stdout.split('\n').filter(line => line.trim().length > 0);
+  } catch (error) {
+    if (error instanceof Error) {
+      // If it's the ripgrep not found error we threw above, rethrow it
+      if (error.message.includes('ripgrep (rg) is not installed')) {
+        throw error;
+      }
+      // For ripgrep exit code 1 (no matches), return empty array
+      if ('code' in error && (error as any).code === 1) {
+        return [];
+      }
+    }
+    throw error;
+  }
 }
 
 // file editing and diffing utilities
