@@ -186,6 +186,52 @@ async function getFileStats(filePath: string): Promise<FileInfo> {
   };
 }
 
+async function searchFilesWithNodeJs(
+  rootPath: string,
+  pattern: string,
+  excludePatterns: string[] = []
+): Promise<string[]> {
+  const results: string[] = [];
+
+  async function search(currentPath: string) {
+    const entries = await fs.readdir(currentPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = path.join(currentPath, entry.name);
+
+      try {
+        // Validate each path before processing
+        await validatePath(fullPath);
+
+        // Check if path matches any exclude pattern
+        const relativePath = path.relative(rootPath, fullPath);
+        const shouldExclude = excludePatterns.some(pattern => {
+          const globPattern = pattern.includes('*') ? pattern : `**/${pattern}/**`;
+          return minimatch(relativePath, globPattern, { dot: true });
+        });
+
+        if (shouldExclude) {
+          continue;
+        }
+
+        if (entry.name.toLowerCase().includes(pattern.toLowerCase())) {
+          results.push(fullPath);
+        }
+
+        if (entry.isDirectory()) {
+          await search(fullPath);
+        }
+      } catch (error) {
+        // Skip invalid paths during search
+        continue;
+      }
+    }
+  }
+
+  await search(rootPath);
+  return results;
+}
+
 async function searchFiles(
   rootPath: string,
   pattern: string,
@@ -197,6 +243,14 @@ async function searchFiles(
 
   // Validate the root path first
   const validRootPath = await validatePath(rootPath);
+
+  // First check if ripgrep is installed
+  try {
+    await execAsync('rg --version');
+  } catch (error) {
+    // Fallback to Node.js implementation if ripgrep is not available
+    return searchFilesWithNodeJs(rootPath, pattern, excludePatterns);
+  }
 
   // Escape special regex characters in the pattern if it's not already a regex
   const escapedPattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -216,25 +270,16 @@ async function searchFiles(
   cmd += ` '${validRootPath}'`;
 
   try {
-    // First check if ripgrep is installed
-    try {
-      await execAsync('rg --version');
-    } catch (error) {
-      throw new Error('ripgrep (rg) is not installed or not in PATH');
-    }
-
     const { stdout } = await execAsync(cmd);
     return stdout.split('\n').filter(line => line.trim().length > 0);
   } catch (error) {
     if (error instanceof Error) {
-      // If it's the ripgrep not found error we threw above, rethrow it
-      if (error.message.includes('ripgrep (rg) is not installed')) {
-        throw error;
-      }
       // For ripgrep exit code 1 (no matches), return empty array
       if ('code' in error && (error as any).code === 1) {
         return [];
       }
+      // For other errors, fall back to Node.js implementation
+      return searchFilesWithNodeJs(rootPath, pattern, excludePatterns);
     }
     throw error;
   }
